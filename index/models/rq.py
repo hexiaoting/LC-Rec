@@ -36,6 +36,15 @@ class ResidualVectorQuantizer(nn.Module):
             all_codebook.append(codebook)
         return torch.stack(all_codebook)
 
+    def vq_normal_init(self, labels, x):
+        print("--------->rq2.py vq_normal_init")
+        x_q = 0
+        residual = x
+        for idx, quantizer in enumerate(self.vq_layers):
+            _, x_res = quantizer.vq_init(labels, idx, residual)
+            residual = residual - x_res
+            x_q = x_q + x_res
+
     def forward(self, x, use_sk=True):
         all_losses = []
         all_indices = []

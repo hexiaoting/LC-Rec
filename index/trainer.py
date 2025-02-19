@@ -109,10 +109,15 @@ class Trainer(object):
                     )
 
         for batch_idx, data in enumerate(iter_data):
-            data = data.to(self.device)
+            if isinstance(data, dict):
+                embedding = data['embedding'].to(self.device)
+                labels = data['labels']
+            else:
+                embedding = data.to(self.device)
+                labels = torch.empty(0)
             self.optimizer.zero_grad()
-            out, rq_loss, indices = self.model(data)
-            loss, loss_recon = self.model.compute_loss(out, rq_loss, xs=data)
+            out, rq_loss, indices = self.model(embedding)
+            loss, loss_recon = self.model.compute_loss(out, rq_loss, xs=embedding)
             self._check_nan(loss)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
@@ -123,6 +128,57 @@ class Trainer(object):
             total_recon_loss += loss_recon.item()
 
         return total_loss, total_recon_loss
+
+    #将索引转为正确的码本编号，打印出来看看
+        #    比如以下结果表明有4类样本：
+        #         第0类样本和其他样本区别度较大，84%都识别正确了，且映射到码本的第一个码
+        #         第1类样本有一大半映射到了第4个码本
+        #         但是第2和3类样本没有区分开来，都映射到了第3个码，最好是分别映射到第2、3个码，不要重。
+        #       [(0, 8430), (1, 623), (3, 593), (2, 354)]
+        #       [(3, 7096), (2, 2000), (1, 851), (0, 53)]
+        #       [(3, 5240), (1, 2560), (2, 1791), (0, 409)]
+        #        ****************Error************
+        #       [(1, 5523), (2, 3691), (3, 693), (0, 93)]
+    def convert_true_lable_to_cbindex(self, indices, labels, level=0):
+        #首先获得labels当前这一级别(level级别)的不同编号，映射到0,1,2,...
+        mapping={}
+        label = labels[:, level]
+        if isinstance(label, np.ndarray):
+            sorted_label = np.unique(label)
+            size = len(sorted_label)
+            for idx, v in enumerate(sorted_label):
+                mapping[idx] = v
+        else:
+            label = label.cpu()
+            sorted_tensor, idx = torch.unique(label).sort()
+            size = idx.numpy()[-1]+1
+            for i in idx.numpy():
+                mapping[i] = sorted_tensor[i].item()
+
+        #S2. 分别打印每一个类别通过码本获得的索引编号，比如看看beauty这个一类别在码本中分别被映射到哪个码本，每个码本映射的数量是多少
+        #    最佳的结果是所有beauty的样本的码本索引都一样，toys类别的样本的码本indices都一样（但和beauty是不一样的），这才是最佳结果
+
+        new_label = np.zeros(label.shape[0], dtype=np.int64)
+        used_codes = set()
+        if level == 0:
+            print("codebook-l0-result:")
+        for i in range(size):
+            index = np.where(label == mapping[i])[0]
+            unique_elements, counts = np.unique(indices[:,level][index], return_counts=True)
+            sorted_counts = sorted(zip(unique_elements, counts), key=lambda x: x[1], reverse=True)
+            print(sorted_counts)
+            # 用以下方法可以打印某些二级分类情况
+            # print("" if level == 0 else "\t", sorted_counts)
+            # if level == 0 and (i == 2 or i == 3):
+            #     sub_index = index[np.where(indices[:,level][index] == i)] #在这个一级码本 i 下正确的分类的样本下标，看看他们的二级分类效果如何
+            #     self.convert_true_lable_to_cbindex(indices[sub_index], labels[sub_index], level+1)
+            if sorted_counts[0][0] not in used_codes:
+                used_codes.add(sorted_counts[0][0])
+            else:
+                #发现两类应该区别开来的类别居然都大部分映射到同一个码去了
+                print("****************Error************")
+            new_label[index]=sorted_counts[0][0]
+        return new_label
 
     @torch.no_grad()
     def _valid_epoch(self, valid_data):
@@ -138,14 +194,31 @@ class Trainer(object):
 
         indices_set = set()
         num_sample = 0
+        #hwt 修改
+        all_indices = []
+        all_labels = []
         for batch_idx, data in enumerate(iter_data):
-            num_sample += len(data)
-            data = data.to(self.device)
-            indices = self.model.get_indices(data)
+            if isinstance(data, dict):
+                embedding = data['embedding'].to(self.device)
+                labels = data['labels']
+            else:
+                embedding = data.to(self.device)
+                labels = torch.empty(0)
+            num_sample += len(embedding)
+            indices = self.model.get_indices(embedding)
             indices = indices.view(-1,indices.shape[-1]).cpu().numpy()
             for index in indices:
                 code = "-".join([str(int(_)) for _ in index])
                 indices_set.add(code)
+
+            for v in indices:
+                all_indices.append(v)
+            for v in labels.numpy():
+                all_labels.append(v)
+
+        all_indices = np.vstack(all_indices)
+        all_labels = np.vstack(all_labels)
+        _ = self.convert_true_lable_to_cbindex(all_indices, all_labels, level=0)
 
         collision_rate = (num_sample - len(list(indices_set)))/num_sample
 
@@ -185,10 +258,23 @@ class Trainer(object):
 
 
     def fit(self, data):
+        #第一步：初始化模型参数
+        if self.args.init_method in ["load_from_ckpt"]: #从init_state文件里初始化
+            state = torch.load(f"{self.args.ckpt_dir}/init_state")
+            self.model.load_state_dict(state['state_dict'])
+        elif self.args.init_method in ["full_init"]:
+            self.model.eval()
+            self.model.vq_initialization(data.dataset['labels'], data.dataset['embedding'].to(self.device))
+            self._save_checkpoint(epoch=0, ckpt_file="init_state")
+        else:
+            print("**************** You donot init codebook first!!! ****************")
 
         cur_eval_step = 0
 
         for epoch_idx in range(self.epochs):
+            if epoch_idx == 0:
+                _ = self._valid_epoch(data)
+
             # train
             training_start_time = time()
             train_loss, train_recon_loss = self._train_epoch(data, epoch_idx)

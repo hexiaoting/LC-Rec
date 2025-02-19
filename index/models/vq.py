@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .layers import kmeans, sinkhorn_algorithm
+import numpy as np
 
 
 class VectorQuantizer(nn.Module):
@@ -47,6 +48,50 @@ class VectorQuantizer(nn.Module):
 
         self.embedding.weight.data.copy_(centers)
         self.initted = True
+
+
+    def get_statistics(self, indices, label, size):
+        sorted_tensor, idx = torch.unique(label).sort()
+        mapping={}
+        results = []
+        for i in idx.numpy():
+            mapping[i] = sorted_tensor[i].item()
+        for i in range(size):
+            index = np.where(label.cpu() == mapping[i])[0]
+            unique_elements, counts = np.unique(indices[index].cpu().numpy(), return_counts=True)
+            sorted_counts = sorted(zip(unique_elements, counts), key=lambda x: x[1], reverse=True)
+            print(sorted_counts)
+            results.append(np.where(indices[index].cpu().numpy() == i)[0])
+
+        return results
+
+    def vq_init(self, labels, level, x): #x.shape=[12101, 32]是所有样本经过encoder后的向量
+        print("----->vq2.py vq_init embedding=(", self.n_e, ",", self.e_dim, ")   x.shape=", x.shape)
+        latent = x.view(-1, self.e_dim) #e_dim=32
+
+        # Debug info
+        if level < 4:
+            # print(self.n_e, latent.shape)
+            print("latent=",latent)
+
+        if not self.initted:
+            self.init_emb(latent)
+            self.initted = True
+
+        d = torch.sum(latent**2, dim=1, keepdim=True) + \
+            torch.sum(self.embedding.weight**2, dim=1, keepdim=True).t()- \
+            2 * torch.matmul(latent, self.embedding.weight.t()) #d is a tensor, d.shape=[12101,256]
+
+        indices = torch.argmin(d, dim=-1)
+        x_q = self.embedding(indices).view(x.shape)
+        
+        if level == 0:
+            print("##################distribution##########\n", torch.unique(indices,return_counts=True))
+            _ = self.get_statistics(indices, labels[:,0], self.n_e)
+
+        print("codebook#######self.embedding.weight=\n", self.embedding.weight.data)
+        return indices, x_q #[12101, 32]
+
 
     @staticmethod
     def center_distance_for_constraint(distances):

@@ -58,6 +58,12 @@ class RQVAE(nn.Module):
         self.decoder = MLPLayers(layers=self.decode_layer_dims,
                                        dropout=self.dropout_prob,bn=self.bn)
 
+    def vq_initialization(self, labels, embeddings): #x.shape=[12101, 768]
+        print("------->vq_initialization")
+        encoded_embedding = self.encoder(embeddings)
+        self.rq.vq_normal_init(labels, encoded_embedding)
+        print("<-------vq_initialization")
+
     def forward(self, x, use_sk=True):
         x = self.encoder(x)
         x_q, rq_loss, indices = self.rq(x,use_sk=use_sk)

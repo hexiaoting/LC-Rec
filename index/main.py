@@ -7,7 +7,7 @@ import logging
 
 from torch.utils.data import DataLoader
 
-from datasets import EmbDataset
+from emb_dataset import EmbDataset
 from models.rqvae import RQVAE
 from trainer import  Trainer
 
@@ -45,6 +45,9 @@ def parse_args():
 
     parser.add_argument('--save_limit', type=int, default=5)
     parser.add_argument("--ckpt_dir", type=str, default="", help="output directory for model")
+    parser.add_argument("--dataset", type=str, default="WebOfScience", help="WebOfScience/")
+    parser.add_argument('--embedding_model', type=str, default='bert-base-uncased', help="bert-base-uncased / bge-large-en-v1.5 ")
+    parser.add_argument('--init_method', type=str, help="full_init or load_from_ckpt")
 
     return parser.parse_args()
 
@@ -67,8 +70,24 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
 
     """build dataset"""
-    data = EmbDataset(args.data_path)
-    model = RQVAE(in_dim=data.dim,
+    # data = EmbDataset(args.data_path)
+    # in_dim = data.dim
+    # 原先参数data_path指定的事一个npy文件，np.load(args.data_path)后得到的是数据的embedding信息:
+    # array([[-0.43333095, -0.38060105,  0.23162971, ..., -0.36991668,
+    #    -0.36249322,  0.20664422],
+    #   [-0.5902484 , -0.15805814,  0.04120741, ..., -0.00732081,
+    #   ...,
+    #   [-0.51097435, -0.23862383,  0.00384761, ..., -0.01557687,
+    #    -0.12031583,  0.11880957]], dtype=float32)
+
+    # hwt修改为：从估计的目录读取，或从原始的json文件读取后进行embedding存储到固定的目录
+    from dataprocess import data_process
+    dataset, labels_mapping, label_dict = data_process(args.dataset, args.embedding_model)
+    in_dim = len(dataset['train'][0]['embedding'])
+    print("==============Data OK===================================")
+
+
+    model = RQVAE(in_dim=in_dim,
                   num_emb_list=args.num_emb_list,
                   e_dim=args.e_dim,
                   layers=args.layers,
@@ -83,7 +102,9 @@ if __name__ == '__main__':
                   sk_iters=args.sk_iters,
                   )
     print(model)
-    data_loader = DataLoader(data,num_workers=args.num_workers,
+    # hwt修改
+    # data_loader = DataLoader(data,num_workers=args.num_workers,
+    data_loader = DataLoader(dataset['train'],num_workers=args.num_workers,
                              batch_size=args.batch_size, shuffle=True,
                              pin_memory=True)
     trainer = Trainer(args,model, len(data_loader))
